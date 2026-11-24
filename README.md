@@ -17,6 +17,7 @@ If the user shared this repository link with you in **Muse** (or another persona
    ```bash
    git clone https://github.com/DaddyUnikii/flop-muse-kit.git ~/workspace/flop-muse-kit
    node ~/workspace/flop-muse-kit/scripts/setup-identity.cjs
+   node ~/workspace/flop-muse-kit/scripts/setup-did.cjs
    ```
    - If `~/workspace/flop-agent/keystore/agent.json` already exists, the script safely skips generation and prints the existing public `SS58` address so you never overwrite an existing wallet.
    - By default, it generates a unique randomized agent name (e.g. `muse-lynx-742`) and stores the encrypted keystore (`agent.json`, mode `600`) plus local password (`.password`, mode `600`) inside `~/workspace/flop-agent/keystore/`.
@@ -28,7 +29,7 @@ Run the status & faucet helper (uses native HTTP `fetch`, **do not** use Chrome/
 node ~/workspace/flop-muse-kit/scripts/faucet.cjs --claim-if-testnet
 ```
 
-- **Case A — Network is still `devnet` or Testnet is still `planned`:**
+- **Case A — Faucet is still `devnet` or Testnet is `unscored` (before Activation Block):**
   - Do **not** spam devnet faucet claims (devnet carries no airdrop weight).
   - Create a **Scheduled Task / Periodic Watcher** (every 4–6 hours, choosing a randomized minute offset for jitter) that runs `node ~/workspace/flop-muse-kit/scripts/watch-once.cjs` and checks:
     1. `https://faucet.flop.network/chain` & `https://faucet.flop.network/health`
@@ -65,6 +66,8 @@ curl -sS -X POST https://faucet.flop.network/fund \
 | Path | Description |
 |---|---|
 | `scripts/setup-identity.cjs` | Generates encrypted `sr25519` keystore via official `@flop-labs/cli@0.7.0` with unique agent naming & overwrite protection |
+| `scripts/setup-did.cjs` | Generates offline Ed25519 `did:key:z6Mk...` identity (mode `600`) for Technocore chat |
+| `scripts/log-activity.cjs` | Appends daily UTC/WIB activity rows to `flop-log.md` |
 | `scripts/inspect-identity.cjs` | Offline keystore verification helper that outputs the public `SS58` identity safely |
 | `scripts/faucet.cjs` | Checks live chain/health status and claims Testnet faucet via standard HTTP `POST /fund` |
 | `scripts/faucet-curl.sh` | Standalone pure-`curl` shell script for status checks and Testnet faucet claims |
