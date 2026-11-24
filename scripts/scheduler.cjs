@@ -1,12 +1,15 @@
 // scripts/scheduler.cjs
-// Tracks per-agent 24h faucet cooldown with a light randomized 1-10 minute jitter
-// (prevents hitting the 24h cooldown too early without drifting hours late),
-// and generates separate randomized spend windows for Testnet inference.
+// Tracks per-agent 24h + 1-10m faucet cooldown and builds randomized daily
+// 3-wave inference spend schedules in Asia/Jakarta (WIB, UTC+7):
+//   G1: 09:00-10:00 WIB start, 40-80m duration, 30% allocation
+//   G2: 11:00-12:00 WIB start, 50-100m duration, 40% allocation
+//   G3: 13:00-15:00 WIB start, 45-85m duration, 30% allocation
+// Works identically on local PC, Muse, and VPS regardless of server timezone.
 //
 // Usage:
-//   node scripts/scheduler.cjs status         -> Show next eligible claim time & spend plan
-//   node scripts/scheduler.cjs record-claim   -> Record a successful faucet claim & compute next window
-//   node scripts/scheduler.cjs plan-spend     -> Generate a randomized multi-wave inference schedule
+//   node scripts/scheduler.cjs status         -> Show cooldown & today's spend waves
+//   node scripts/scheduler.cjs record-claim   -> Record claim (24h + 1-10m) & generate waves
+//   node scripts/scheduler.cjs plan-spend     -> Re-generate randomized G1-G3 waves
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -21,8 +24,15 @@ const AGENT_DIR = process.env.FLOP_AGENT_DIR || defaultBase;
 const STATE_PATH = path.join(AGENT_DIR, 'state.json');
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const WIB_OFFSET_MS = 7 * 60 * 60 * 1000;
 const MIN_CLAIM_JITTER_MIN = 1;
 const MAX_CLAIM_JITTER_MIN = 10;
+
+const WAVE_SPECS = [
+  { wave: 1, sharePct: 30, startHourWib: 9, endHourWib: 10, minDurMin: 40, maxDurMin: 80 },
+  { wave: 2, sharePct: 40, startHourWib: 11, endHourWib: 12, minDurMin: 50, maxDurMin: 100 },
+  { wave: 3, sharePct: 30, startHourWib: 13, endHourWib: 15, minDurMin: 45, maxDurMin: 85 },
+];
 
 function readState() {
   if (!fs.existsSync(STATE_PATH)) {
@@ -41,20 +51,52 @@ function toWib(ts) {
   return new Date(ts).toLocaleString('sv-SE', { timeZone: 'Asia/Jakarta' }) + ' WIB';
 }
 
-function buildRandomSpendWaves(baseTimeMs = Date.now(), waves = 3) {
-  const plan = [];
-  let cursor = baseTimeMs;
-  for (let i = 1; i <= waves; i++) {
-    // Spread waves across the day with 45 to 180 minutes random gaps
-    const gapMin = crypto.randomInt(45, 181);
-    cursor += gapMin * 60 * 1000;
-    plan.push({
-      wave: i,
-      scheduledAtUtc: new Date(cursor).toISOString(),
-      scheduledAtWib: toWib(cursor),
-      delayMinutesFromPrev: gapMin,
-    });
+function getWibMidnightUtcMs(referenceMs) {
+  const wibDate = new Date(referenceMs + WIB_OFFSET_MS);
+  const year = wibDate.getUTCFullYear();
+  const month = wibDate.getUTCMonth();
+  const day = wibDate.getUTCDate();
+  return Date.UTC(year, month, day, 0, 0, 0) - WIB_OFFSET_MS;
+}
+
+function buildDailySpendWaves(referenceMs = Date.now()) {
+  let targetDayStartUtcMs = getWibMidnightUtcMs(referenceMs);
+  const wibHourNow = new Date(referenceMs + WIB_OFFSET_MS).getUTCHours();
+
+  // If generated after 15:00 WIB, plan for tomorrow's WIB cycle
+  if (wibHourNow >= 15) {
+    targetDayStartUtcMs += ONE_DAY_MS;
   }
+
+  const plan = [];
+  let minAllowedStartMs = Math.max(referenceMs + 60 * 1000, targetDayStartUtcMs);
+
+  for (const spec of WAVE_SPECS) {
+    const windowStartMs = targetDayStartUtcMs + spec.startHourWib * 3600 * 1000;
+    const windowEndMs = targetDayStartUtcMs + spec.endHourWib * 3600 * 1000;
+
+    const effectiveStartMs = Math.max(windowStartMs, minAllowedStartMs);
+    const effectiveEndMs = Math.max(effectiveStartMs, windowEndMs);
+
+    const spanSec = Math.max(1, Math.floor((effectiveEndMs - effectiveStartMs) / 1000));
+    const startMs = effectiveStartMs + crypto.randomInt(0, spanSec + 1) * 1000;
+    const durationMin = crypto.randomInt(spec.minDurMin, spec.maxDurMin + 1);
+    const endMs = startMs + durationMin * 60 * 1000;
+
+    plan.push({
+      wave: spec.wave,
+      sharePct: spec.sharePct,
+      startWib: toWib(startMs),
+      endWib: toWib(endMs),
+      durationMinutes: durationMin,
+      startUtc: new Date(startMs).toISOString(),
+      endUtc: new Date(endMs).toISOString(),
+    });
+
+    // Ensure at least a 5-minute buffer before the next wave can start
+    minAllowedStartMs = endMs + 5 * 60 * 1000;
+  }
+
   return plan;
 }
 
@@ -65,7 +107,7 @@ const now = Date.now();
 if (cmd === 'record-claim') {
   const jitterMin = crypto.randomInt(MIN_CLAIM_JITTER_MIN, MAX_CLAIM_JITTER_MIN + 1);
   const nextClaimMs = now + ONE_DAY_MS + jitterMin * 60 * 1000;
-  const spendPlan = buildRandomSpendWaves(now, 3);
+  const spendPlan = buildDailySpendWaves(now);
 
   const updated = {
     lastClaimAt: new Date(now).toISOString(),
@@ -81,15 +123,13 @@ if (cmd === 'record-claim') {
 }
 
 if (cmd === 'plan-spend') {
-  const waves = Number(process.argv[3] || 3);
-  const spendPlan = buildRandomSpendWaves(now, Math.max(1, Math.min(waves, 6)));
+  const spendPlan = buildDailySpendWaves(now);
   state.spendPlan = spendPlan;
   writeState(state);
   console.log(JSON.stringify({ ok: true, action: 'plan-spend', spendPlan }, null, 2));
   process.exit(0);
 }
 
-// Default: status
 const nextMs = state.nextClaimAt ? Date.parse(state.nextClaimAt) : 0;
 const eligibleNow = !state.nextClaimAt || now >= nextMs;
 const remainingMinutes = eligibleNow ? 0 : Math.ceil((nextMs - now) / 60000);
