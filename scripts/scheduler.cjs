@@ -1,15 +1,10 @@
 // scripts/scheduler.cjs
 // Tracks per-agent 24h + 1-10m faucet cooldown and builds randomized daily
 // 3-wave inference spend schedules in Asia/Jakarta (WIB, UTC+7):
-//   G1: 09:00-10:00 WIB start, 40-80m duration, 30% allocation
-//   G2: 11:00-12:00 WIB start, 50-100m duration, 40% allocation
-//   G3: 13:00-15:00 WIB start, 45-85m duration, 30% allocation
+//   G1: start 09:00-10:00 WIB, duration 40-80m, 30% allocation (paced across duration)
+//   G2: start 11:00-12:00 WIB, duration 50-100m, 40% allocation (paced across duration)
+//   G3: start 13:00-15:00 WIB, duration 45-85m, 30% allocation (paced across duration)
 // Works identically on local PC, Muse, and VPS regardless of server timezone.
-//
-// Usage:
-//   node scripts/scheduler.cjs status         -> Show cooldown & today's spend waves
-//   node scripts/scheduler.cjs record-claim   -> Record claim (24h + 1-10m) & generate waves
-//   node scripts/scheduler.cjs plan-spend     -> Re-generate randomized G1-G3 waves
 
 const crypto = require('crypto');
 const fs = require('fs');
@@ -29,9 +24,9 @@ const MIN_CLAIM_JITTER_MIN = 1;
 const MAX_CLAIM_JITTER_MIN = 10;
 
 const WAVE_SPECS = [
-  { wave: 1, sharePct: 30, startHourWib: 9, endHourWib: 10, minDurMin: 40, maxDurMin: 80 },
-  { wave: 2, sharePct: 40, startHourWib: 11, endHourWib: 12, minDurMin: 50, maxDurMin: 100 },
-  { wave: 3, sharePct: 30, startHourWib: 13, endHourWib: 15, minDurMin: 45, maxDurMin: 85 },
+  { wave: 1, sharePct: 30, startHourWib: 9, endHourWib: 10, minDurMin: 40, maxDurMin: 80, minSteps: 5, maxSteps: 9 },
+  { wave: 2, sharePct: 40, startHourWib: 11, endHourWib: 12, minDurMin: 50, maxDurMin: 100, minSteps: 6, maxSteps: 12 },
+  { wave: 3, sharePct: 30, startHourWib: 13, endHourWib: 15, minDurMin: 45, maxDurMin: 85, minSteps: 5, maxSteps: 9 },
 ];
 
 function readState() {
@@ -53,17 +48,49 @@ function toWib(ts) {
 
 function getWibMidnightUtcMs(referenceMs) {
   const wibDate = new Date(referenceMs + WIB_OFFSET_MS);
-  const year = wibDate.getUTCFullYear();
-  const month = wibDate.getUTCMonth();
-  const day = wibDate.getUTCDate();
-  return Date.UTC(year, month, day, 0, 0, 0) - WIB_OFFSET_MS;
+  return Date.UTC(wibDate.getUTCFullYear(), wibDate.getUTCMonth(), wibDate.getUTCDate(), 0, 0, 0) - WIB_OFFSET_MS;
+}
+
+// Spreads each wave's allocation across randomized micro-intervals spanning startMs -> endMs
+function buildWaveSteps(startMs, endMs, waveSharePct, minSteps, maxSteps) {
+  const count = crypto.randomInt(minSteps, maxSteps + 1);
+  const durMs = Math.max(60000, endMs - startMs);
+
+  // Pick randomized sorted timestamps inside [startMs, endMs]
+  const offsets = [0];
+  for (let i = 1; i < count - 1; i++) {
+    offsets.push(crypto.randomInt(Math.floor(durMs * 0.05), Math.floor(durMs * 0.95) + 1));
+  }
+  if (count > 1) offsets.push(durMs);
+  offsets.sort((a, b) => a - b);
+
+  // Randomize weight per step while summing cleanly to waveSharePct
+  const rawWeights = Array.from({ length: count }, () => crypto.randomInt(50, 151));
+  const totalWeight = rawWeights.reduce((a, b) => a + b, 0);
+  let remainingPct = waveSharePct;
+
+  return offsets.map((offsetMs, idx) => {
+    const stepMs = startMs + offsetMs;
+    let pct;
+    if (idx === count - 1) {
+      pct = Number(remainingPct.toFixed(2));
+    } else {
+      pct = Number(((rawWeights[idx] / totalWeight) * waveSharePct).toFixed(2));
+      remainingPct -= pct;
+    }
+    return {
+      step: idx + 1,
+      atWib: toWib(stepMs),
+      atUtc: new Date(stepMs).toISOString(),
+      pctOfDailyBudget: pct,
+    };
+  });
 }
 
 function buildDailySpendWaves(referenceMs = Date.now()) {
   let targetDayStartUtcMs = getWibMidnightUtcMs(referenceMs);
   const wibHourNow = new Date(referenceMs + WIB_OFFSET_MS).getUTCHours();
 
-  // If generated after 15:00 WIB, plan for tomorrow's WIB cycle
   if (wibHourNow >= 15) {
     targetDayStartUtcMs += ONE_DAY_MS;
   }
@@ -83,17 +110,18 @@ function buildDailySpendWaves(referenceMs = Date.now()) {
     const durationMin = crypto.randomInt(spec.minDurMin, spec.maxDurMin + 1);
     const endMs = startMs + durationMin * 60 * 1000;
 
+    const steps = buildWaveSteps(startMs, endMs, spec.sharePct, spec.minSteps, spec.maxSteps);
+
     plan.push({
       wave: spec.wave,
       sharePct: spec.sharePct,
       startWib: toWib(startMs),
       endWib: toWib(endMs),
       durationMinutes: durationMin,
-      startUtc: new Date(startMs).toISOString(),
-      endUtc: new Date(endMs).toISOString(),
+      stepCount: steps.length,
+      steps,
     });
 
-    // Ensure at least a 5-minute buffer before the next wave can start
     minAllowedStartMs = endMs + 5 * 60 * 1000;
   }
 
