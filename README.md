@@ -68,6 +68,7 @@ curl -sS -X POST https://faucet.flop.network/fund \
 | `scripts/setup-identity.cjs` | Generates encrypted `sr25519` keystore via official `@flop-labs/cli@0.7.0` with unique agent naming & overwrite protection |
 | `scripts/setup-did.cjs` | Generates offline Ed25519 `did:key:z6Mk...` identity (mode `600`) for Technocore chat |
 | `scripts/log-activity.cjs` | Appends daily UTC/WIB activity rows to `flop-log.md` |
+| `scripts/scheduler.cjs` | Tracks `24h + 1–10m` faucet cooldown in `state.json` & builds random spend waves |
 | `scripts/inspect-identity.cjs` | Offline keystore verification helper that outputs the public `SS58` identity safely |
 | `scripts/faucet.cjs` | Checks live chain/health status and claims Testnet faucet via standard HTTP `POST /fund` |
 | `scripts/faucet-curl.sh` | Standalone pure-`curl` shell script for status checks and Testnet faucet claims |
