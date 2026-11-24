@@ -9,6 +9,7 @@
     "claim": "node scripts/faucet.cjs --claim-if-testnet",
     "watch": "node scripts/watch-once.cjs",
     "setup-did": "node scripts/setup-did.cjs",
-    "log": "node scripts/log-activity.cjs"
+    "log": "node scripts/log-activity.cjs",
+    "schedule": "node scripts/scheduler.cjs status"
   }
 }
