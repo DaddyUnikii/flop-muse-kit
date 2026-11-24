@@ -1,0 +1,12 @@
+{
+  "name": "flop-muse-kit",
+  "version": "1.0.0",
+  "description": "Lightweight HTTP-first FLOP Network Agent setup, watcher, and faucet helper for Muse and cloud workspaces",
+  "license": "MIT",
+  "scripts": {
+    "setup": "node scripts/setup-identity.cjs",
+    "status": "node scripts/faucet.cjs",
+    "claim": "node scripts/faucet.cjs --claim-if-testnet",
+    "watch": "node scripts/watch-once.cjs"
+  }
+}
