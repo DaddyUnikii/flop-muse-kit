@@ -2,6 +2,9 @@
 // Lightweight single-pass readiness probe designed for Muse / VPS / Cron watchers.
 // Verifies BOTH the official Testnet RPC genesis hash AND whether faucet.flop.network
 // has switched from devnet to the live Testnet genesis hash.
+// Uses native fetch() with automatic curl fallback for strict container proxies.
+
+const { execFileSync } = require('child_process');
 
 const FAUCET_BASE = (process.env.FAUCET_URL || 'https://faucet.flop.network').replace(/\/+$/, '');
 const API_BASE = (process.env.FLOP_API_URL || 'https://api.flop.network').replace(/\/+$/, '');
@@ -9,15 +12,33 @@ const TESTNET_RPC = (process.env.FLOP_TESTNET_RPC || 'https://testnet.flop.netwo
 const EXPECTED_TESTNET_GENESIS =
   '0x918abd58fb16306b30ef3886514cfaebffecb4de43e82b6f8ec4795c43cfd800';
 
+function curlJson(url, options = {}) {
+  const args = ['-fsSL', '--max-time', '12'];
+  if (options.method) args.push('-X', options.method);
+  if (options.headers) {
+    for (const [k, v] of Object.entries(options.headers)) {
+      args.push('-H', `${k}: ${v}`);
+    }
+  }
+  if (options.body) args.push('-d', options.body);
+  args.push(url);
+  const raw = execFileSync('curl', args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
+  return { ok: true, status: 200, via: 'curl', data: JSON.parse(raw) };
+}
+
 async function probeJson(url, options = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
     const res = await fetch(url, { ...options, signal: ctrl.signal });
     const data = await res.json();
-    return { ok: res.ok, status: res.status, data };
+    return { ok: res.ok, status: res.status, via: 'fetch', data };
   } catch (err) {
-    return { ok: false, error: err.message };
+    try {
+      return curlJson(url, options);
+    } catch (curlErr) {
+      return { ok: false, error: `${err.message} | curl: ${curlErr.message}` };
+    }
   } finally {
     clearTimeout(timer);
   }
