@@ -7,6 +7,8 @@
     "setup": "node scripts/setup-identity.cjs",
     "status": "node scripts/faucet.cjs",
     "claim": "node scripts/faucet.cjs --claim-if-testnet",
-    "watch": "node scripts/watch-once.cjs"
+    "watch": "node scripts/watch-once.cjs",
+    "setup-did": "node scripts/setup-did.cjs",
+    "log": "node scripts/log-activity.cjs"
   }
 }
