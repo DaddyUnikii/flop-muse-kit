@@ -26,17 +26,29 @@ function curlJson(url, options = {}) {
   return { ok: true, status: 200, via: 'curl', data: JSON.parse(raw) };
 }
 
-async function probeJson(url, options = {}) {
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function probeJson(url, options = {}, attempt = 1) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
     const res = await fetch(url, { ...options, signal: ctrl.signal });
+    if (res.status === 429 && attempt < 2) {
+      await sleep(1500);
+      return probeJson(url, options, attempt + 1);
+    }
     const data = await res.json();
     return { ok: res.ok, status: res.status, via: 'fetch', data };
   } catch (err) {
     try {
       return curlJson(url, options);
     } catch (curlErr) {
+      if (attempt < 2) {
+        await sleep(1500);
+        return probeJson(url, options, attempt + 1);
+      }
       return { ok: false, error: `${err.message} | curl: ${curlErr.message}` };
     }
   } finally {
@@ -59,6 +71,8 @@ async function probeJson(url, options = {}) {
   const faucetNetwork = chain?.data?.network || 'unknown';
   const faucetGenesis = chain?.data?.genesisHash || null;
   const faucetReady = Boolean(health?.data?.ready);
+  const faucetFundingStatus = health?.data?.dependencies?.funding?.faucet?.status || null;
+  const faucetOpen = faucetFundingStatus === 'open';
   const testnetRpcGenesis = rpcGenesis?.data?.result || null;
   const testnetRpcOnline = testnetRpcGenesis === EXPECTED_TESTNET_GENESIS;
   const faucetMatchesTestnet =
@@ -75,8 +89,9 @@ async function probeJson(url, options = {}) {
     faucetMatchesTestnet,
     faucetStatus: health?.data?.status || null,
     faucetReady,
+    faucetFundingStatus,
     gatewayModelsCount: modelCount,
-    readyForTestnetClaim: testnetRpcOnline && faucetMatchesTestnet && faucetReady,
+    readyForTestnetClaim: testnetRpcOnline && faucetMatchesTestnet && (faucetReady || faucetOpen),
     recommendedNextMinuteJitter: Math.floor(Math.random() * 45) + 5,
   };
 
