@@ -20,6 +20,7 @@ const explicitAddr = args.find(a => !a.startsWith('--'));
 
 const FAUCET_BASE = (process.env.FAUCET_URL || 'https://faucet.flop.network').replace(/\/+$/, '');
 const TECHNOCORE_BASE = (process.env.TECHNOCORE_URL || 'https://technocore.chat').replace(/\/+$/, '');
+const DEFAULT_TESTNET_GENESIS = '0x918abd58fb16306b30ef3886514cfaebffecb4de43e82b6f8ec4795c43cfd800';
 
 function findExistingFile(relParts) {
   const candidates = [
@@ -149,13 +150,105 @@ async function sendTechnocoreClaim(address, room) {
     process.exit(0);
   }
 
-  const claimPath = network === 'testnet' ? '/v1/testnet/agent-claims' : '/fund';
-  console.log(`\nTrying HTTP POST ${FAUCET_BASE}${claimPath} for ${address} ...`);
-  const fundRes = await fetch(`${FAUCET_BASE}${claimPath}`, {
+function requirePolkadot(agentJsonPath) {
+  const bases = [
+    path.resolve(__dirname, '..'),
+    path.dirname(path.dirname(agentJsonPath)),
+    process.env.FLOP_AGENT_DIR,
+  ].filter(Boolean);
+
+  for (const modName of ['@polkadot/keyring', '@polkadot/util-crypto', '@polkadot/util']) {
+    let loaded = false;
+    for (const base of bases) {
+      try {
+        require.resolve(modName, { paths: [base] });
+        loaded = true;
+        break;
+      } catch (_) {}
+    }
+    if (!loaded) {
+      try {
+        require.resolve(modName);
+      } catch (_) {
+        return null;
+      }
+    }
+  }
+
+  const resolveFrom = name => {
+    for (const base of bases) {
+      try {
+        return require(require.resolve(name, { paths: [base] }));
+      } catch (_) {}
+    }
+    return require(name);
+  };
+
+  return {
+    Keyring: resolveFrom('@polkadot/keyring').Keyring,
+    cryptoWaitReady: resolveFrom('@polkadot/util-crypto').cryptoWaitReady,
+    stringToU8a: resolveFrom('@polkadot/util').stringToU8a,
+    u8aToHex: resolveFrom('@polkadot/util').u8aToHex,
+  };
+}
+
+async function buildD10ClaimPayload(targetAddress, genesisHash) {
+  const agentJsonPath = findExistingFile(['keystore', 'agent.json']);
+  const passPath = findExistingFile(['keystore', '.password']);
+  if (!agentJsonPath || !passPath) return null;
+
+  const polkadot = requirePolkadot(agentJsonPath);
+  if (!polkadot) return null;
+
+  await polkadot.cryptoWaitReady();
+  const keyJson = JSON.parse(fs.readFileSync(agentJsonPath, 'utf8'));
+  const pass = fs.readFileSync(passPath, 'utf8').trim();
+  const keyring = new polkadot.Keyring({ type: 'sr25519' });
+  const pair = keyring.addFromJson(keyJson);
+  pair.decodePkcs8(pass);
+
+  if (pair.address !== targetAddress) {
+    throw new Error(`Keystore address (${pair.address}) does not match target (${targetAddress})`);
+  }
+
+  const nonce = String(Date.now());
+  const challenge = `flop-faucet-agent/v1|${genesisHash}|${targetAddress}|${nonce}`;
+  const signature = polkadot.u8aToHex(pair.sign(polkadot.stringToU8a(challenge)));
+  return { address: targetAddress, nonce, signature };
+}
+
+  const isTestnet = network === 'testnet';
+  const claimPath = isTestnet ? '/v1/testnet/agent-claims' : '/fund';
+  const genesisHash = chainRes?.body?.genesisHash || DEFAULT_TESTNET_GENESIS;
+  let bodyPayload = { client: 'faucet-web', address };
+
+  if (isTestnet) {
+    const signedPayload = await buildD10ClaimPayload(address, genesisHash);
+    if (signedPayload) {
+      bodyPayload = signedPayload;
+      console.log(`\nSubmitting D10 signed claim to ${FAUCET_BASE}${claimPath} for ${address} ...`);
+    } else {
+      console.log(`\nTrying HTTP POST ${FAUCET_BASE}${claimPath} for ${address} (no local sr25519 keystore found)...`);
+    }
+  } else {
+    console.log(`\nTrying HTTP POST ${FAUCET_BASE}${claimPath} for ${address} ...`);
+  }
+
+  let fundRes = await fetch(`${FAUCET_BASE}${claimPath}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ client: 'faucet-web', address }),
+    body: JSON.stringify(bodyPayload),
   });
+
+  if (fundRes.status >= 502 && fundRes.status <= 504) {
+    console.log(`HTTP ${fundRes.status} — retrying once after 2s...`);
+    await new Promise(r => setTimeout(r, 2000));
+    fundRes = await fetch(`${FAUCET_BASE}${claimPath}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyPayload),
+    });
+  }
 
   const rawText = await fundRes.text();
   if (fundRes.ok) {
@@ -163,8 +256,13 @@ async function sendTechnocoreClaim(address, room) {
     return;
   }
 
+  if (fundRes.status === 429 || fundRes.status >= 500) {
+    console.error(`HTTP ${claimPath} failed (${fundRes.status}):`, rawText.slice(0, 300));
+    process.exit(1);
+  }
+
   console.log(`HTTP ${claimPath} returned ${fundRes.status}; falling back to Technocore room...`);
-  const room = chainRes?.body?.technocoreBot?.room || (network === 'testnet' ? 'flop-testnet-faucet' : 'flop-devnet-faucet');
+  const room = chainRes?.body?.technocoreBot?.room || (isTestnet ? 'flop-testnet-faucet' : 'flop-devnet-faucet');
   const tcRes = await sendTechnocoreClaim(address, room);
   console.log(`Technocore (${tcRes.mode}) HTTP ${tcRes.status}:`, tcRes.body.trim());
   if (!tcRes.ok) process.exit(1);
